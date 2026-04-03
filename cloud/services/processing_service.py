@@ -12,6 +12,26 @@ from backend.scorer.risk_engine import calculate_risk
 UNKNOWN_USER = "UNKNOWN_USER"
 
 
+def _normalize_event_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+
+def _normalize_time(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def ensure_logs_table() -> None:
     conn = get_connection()
     cursor = conn.cursor()
@@ -53,7 +73,18 @@ def process_and_store_logs(logs: List[Dict[str, Any]]) -> int:
 
     # 1) Per-log enrichment (risk + MITRE)
     for raw in logs:
+        if not isinstance(raw, dict):
+            continue
+
         event = dict(raw)
+
+        event_id = _normalize_event_id(event.get("event_id"))
+        event_time = _normalize_time(event.get("time"))
+        if event_id is None or event_time is None:
+            continue
+
+        event["event_id"] = event_id
+        event["time"] = event_time
 
         event["user"] = _normalize_user(event.get("user"))
         event["action"] = event.get("action") or "other"
@@ -66,7 +97,7 @@ def process_and_store_logs(logs: List[Dict[str, Any]]) -> int:
         event["ocsf"] = ocsf
 
         event["risk"] = calculate_risk(event)
-        event["mitre"] = map_to_mitre(event.get("event_id"))
+        event["mitre"] = map_to_mitre(event_id)
 
         enriched.append(event)
 
