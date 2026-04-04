@@ -14,21 +14,12 @@ fi
 mkdir -p logs
 
 PYTHON_BIN="${PYTHON_BIN:-}"
-STREAMLIT_BIN="${STREAMLIT_BIN:-}"
 
 if [[ -z "$PYTHON_BIN" ]]; then
   if [[ -x ".venv/bin/python" ]]; then
     PYTHON_BIN=".venv/bin/python"
   else
     PYTHON_BIN="python3"
-  fi
-fi
-
-if [[ -z "$STREAMLIT_BIN" ]]; then
-  if [[ -x ".venv/bin/streamlit" ]]; then
-    STREAMLIT_BIN=".venv/bin/streamlit"
-  else
-    STREAMLIT_BIN="streamlit"
   fi
 fi
 
@@ -41,10 +32,20 @@ nohup env SIEM_SERVER_HOST="$SIEM_SERVER_HOST" SIEM_SERVER_PORT="$SIEM_SERVER_PO
   "$PYTHON_BIN" cloud/server.py > logs/api.out 2>&1 &
 API_PID=$!
 
-ohup "$STREAMLIT_BIN" run cloud/dashboard/app.py \
+nohup "$PYTHON_BIN" -m streamlit run cloud/dashboard/app.py \
   --server.address "$SIEM_DASH_HOST" \
   --server.port "$SIEM_DASH_PORT" > logs/dashboard.out 2>&1 &
 DASH_PID=$!
+
+# Quick check: if Streamlit fails immediately (common: module missing), surface it.
+sleep 1
+if ! kill -0 "$DASH_PID" 2>/dev/null; then
+  echo "[SIEM] ERROR: Dashboard failed to start. Last 80 log lines:" >&2
+  tail -n 80 logs/dashboard.out >&2 || true
+  echo "[SIEM] Stopping API as well." >&2
+  kill "$API_PID" 2>/dev/null || true
+  exit 1
+fi
 
 echo "$API_PID" > logs/api.pid
 echo "$DASH_PID" > logs/dashboard.pid
