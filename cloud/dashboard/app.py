@@ -327,7 +327,12 @@ def _style_rows(df: pd.DataFrame):
             styles = ["background-color: #b91c1c; color: white;"] * len(row)
         return styles
 
-    return df.style.apply(row_style, axis=1)
+    try:
+        return df.style.apply(row_style, axis=1)
+    except AttributeError:
+        # pandas Styler requires jinja2; on minimal server installs it may be missing.
+        # Fall back to an unstyled dataframe rather than crashing the dashboard.
+        return df
 
 
 col_left, col_right = st.columns([1, 1])

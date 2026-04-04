@@ -1,8 +1,10 @@
 import argparse
 import socket
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from collections import deque
 
 import requests
 from requests import exceptions as requests_exceptions
@@ -17,6 +19,9 @@ from agent.config import (
     API_URL,
     BATCH_SIZE,
     COLLECT_LIMIT,
+    DEDUPE_CACHE_SIZE,
+    FAIL_RETRY_SECONDS,
+    POLL_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
 )
 from backend.collector.windows_logs import get_system_logs
@@ -124,6 +129,39 @@ def send_logs(logs: List[Dict[str, Any]]) -> None:
             raise RuntimeError(f"Ingest failed: {resp.status_code} {resp.text}")
 
 
+def _event_key(payload: Dict[str, Any]) -> Tuple[str, str, str]:
+    return (
+        str(payload.get("event_id")),
+        str(payload.get("time")),
+        str(payload.get("user")),
+    )
+
+
+def _dedupe_payloads(
+    payloads: List[Dict[str, Any]],
+    seen: Set[Tuple[str, str, str]],
+    order: Deque[Tuple[str, str, str]],
+    max_size: int,
+) -> List[Dict[str, Any]]:
+    if max_size <= 0:
+        return payloads
+
+    unique: List[Dict[str, Any]] = []
+    for payload in payloads:
+        key = _event_key(payload)
+        if key in seen:
+            continue
+        seen.add(key)
+        order.append(key)
+        unique.append(payload)
+
+        while len(order) > max_size:
+            old = order.popleft()
+            seen.discard(old)
+
+    return unique
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="SIEM Agent: collect and send Windows logs")
     parser.add_argument(
@@ -146,54 +184,102 @@ def main() -> None:
         action="store_true",
         help="Use synthetic Windows logs instead of reading the local Security event log",
     )
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Run continuously: collect and send logs every poll interval",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=POLL_SECONDS,
+        help="Polling interval for --continuous (default from SIEM_POLL_SECONDS)",
+    )
+    parser.add_argument(
+        "--no-dedupe",
+        action="store_true",
+        help="Disable in-memory dedupe (may resend same events each cycle)",
+    )
     args = parser.parse_args()
 
     host = socket.gethostname()
+    seen: Set[Tuple[str, str, str]] = set()
+    order: Deque[Tuple[str, str, str]] = deque()
 
-    if args.synthetic:
-        raw_logs = _synthetic_raw_logs()
-    else:
+    def run_once() -> Optional[int]:
+        if args.synthetic:
+            raw_logs = _synthetic_raw_logs()
+        else:
+            try:
+                raw_logs = get_system_logs(limit=COLLECT_LIMIT)
+            except Exception as exc:
+                message = str(exc)
+                if "A required privilege is not held by the client" in message or "(1314," in message:
+                    raise RuntimeError(
+                        "Cannot read Windows Security event log (missing privilege). "
+                        "Run the terminal as Administrator, or rerun with --synthetic for a local test."
+                    ) from exc
+                raise
+
+        payloads = [build_payload(raw, host) for raw in raw_logs]
+        for payload in payloads:
+            validate_payload(payload)
+
+        if not args.no_dedupe:
+            payloads = _dedupe_payloads(payloads, seen, order, DEDUPE_CACHE_SIZE)
+
+        if not payloads:
+            return 0
+
+        if args.print_sample:
+            print("Sample payload:")
+            print(payloads[0])
+
+        if args.dry_run:
+            print(
+                f"Dry run OK: built {len(payloads)} payloads (batch size {BATCH_SIZE}). "
+                "No data was sent."
+            )
+            return len(payloads)
+
+        if args.local_process:
+            from cloud.services.processing_service import ensure_logs_table, process_and_store_logs
+
+            ensure_logs_table()
+            stored = process_and_store_logs(payloads)
+            return stored
+
+        send_logs(payloads)
+        return len(payloads)
+
+    if not args.continuous:
+        sent = run_once()
+        if args.local_process:
+            print(f"Local process OK: processed/stored {sent} logs.")
+        elif args.dry_run:
+            return
+        else:
+            print(f"Sent {sent} logs to {API_URL} in batches of {BATCH_SIZE}.")
+        return
+
+    poll_seconds = max(1, int(args.poll_seconds))
+    print(f"Continuous mode: polling every {poll_seconds}s, sending to {API_URL}.")
+    while True:
         try:
-            raw_logs = get_system_logs(limit=COLLECT_LIMIT)
+            sent = run_once()
+            if args.local_process:
+                print(f"Processed/stored {sent} logs.")
+            elif args.dry_run:
+                print(f"Dry-run built {sent} payloads.")
+            else:
+                print(f"Sent {sent} logs.")
+            time.sleep(poll_seconds)
+        except KeyboardInterrupt:
+            print("Stopping.")
+            return
         except Exception as exc:
-            message = str(exc)
-            if "A required privilege is not held by the client" in message or "(1314," in message:
-                raise RuntimeError(
-                    "Cannot read Windows Security event log (missing privilege). "
-                    "Run the terminal as Administrator, or rerun with --synthetic for a local test."
-                ) from exc
-            raise
-    payloads = [build_payload(raw, host) for raw in raw_logs]
-
-    for payload in payloads:
-        validate_payload(payload)
-
-    if not payloads:
-        print("No logs collected.")
-        return
-
-    if args.print_sample:
-        print("Sample payload:")
-        print(payloads[0])
-
-    if args.dry_run:
-        print(
-            f"Dry run OK: built {len(payloads)} payloads (batch size {BATCH_SIZE}). "
-            "No data was sent."
-        )
-        return
-
-    if args.local_process:
-        # In-process end-to-end test: uses cloud intelligence without starting Flask.
-        from cloud.services.processing_service import ensure_logs_table, process_and_store_logs
-
-        ensure_logs_table()
-        stored = process_and_store_logs(payloads)
-        print(f"Local process OK: processed/stored {stored} logs.")
-        return
-
-    send_logs(payloads)
-    print(f"Sent {len(payloads)} logs to {API_URL} in batches of {BATCH_SIZE}.")
+            print(f"[WARN] Cycle failed: {exc}")
+            time.sleep(FAIL_RETRY_SECONDS)
 
 
 if __name__ == "__main__":
