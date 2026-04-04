@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List
 
 from flask import Blueprint, jsonify, request
@@ -10,7 +11,14 @@ from cloud.services.processing_service import process_and_store_logs
 ingest_bp = Blueprint("ingest", __name__)
 
 
-VALID_API_KEYS = ["agent123"]
+def _load_valid_api_keys() -> list[str]:
+    raw = os.getenv("SIEM_VALID_API_KEYS", "agent123")
+    keys = [k.strip() for k in raw.replace(";", ",").split(",")]
+    keys = [k for k in keys if k]
+    return keys or ["agent123"]
+
+
+VALID_API_KEYS = _load_valid_api_keys()
 MAX_LOGS_PER_REQUEST = 50
 
 

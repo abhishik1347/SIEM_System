@@ -11,3 +11,4 @@ venv/
 *.crt
 *.pfx
 .pytest_cache/
+logs/
