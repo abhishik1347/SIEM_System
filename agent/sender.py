@@ -43,13 +43,13 @@ def _synthetic_raw_logs() -> List[Dict[str, Any]]:
             "event_id": 4624,
             "source": "Security",
             "time": "2026-04-03T12:00:00",
-            "data": [None, None, None, None, None, "alice"],
+            "data": [None, None, None, None, None, "alice", None, None, "10"],
         },
         {
             "event_id": 4625,
             "source": "Security",
             "time": "2026-04-03T12:01:00",
-            "data": [None, None, None, None, None, "alice"],
+            "data": [None, None, None, None, None, "alice", None, None, "3"],
         },
         {
             "event_id": 4672,
@@ -61,7 +61,19 @@ def _synthetic_raw_logs() -> List[Dict[str, Any]]:
             "event_id": 4688,
             "source": "Security",
             "time": "2026-04-03T12:03:00",
-            "data": [None, "bob", None, None, None, "powershell.exe -enc AAA"],
+            "data": [None, "bob", None, None, None, "powershell.exe -enc AAA", None, None, None, None, None, None, None, "explorer.exe"],
+        },
+        {
+            "event_id": 4688,
+            "source": "Security",
+            "time": "2026-04-03T12:03:45",
+            "data": [None, "bob", None, None, None, "cmd.exe /c whoami", None, None, None, None, None, None, None, "powershell.exe"],
+        },
+        {
+            "event_id": 4728,
+            "source": "Security",
+            "time": "2026-04-03T12:04:00",
+            "data": ["charlie", None, "Administrators"],
         },
     ]
 
@@ -92,6 +104,12 @@ def build_payload(raw_log: Dict[str, Any], host: str) -> Dict[str, Any]:
     # Optional context used by backend scoring (kept as additional field).
     if parsed.get("process_name"):
         payload["process_name"] = parsed["process_name"]
+    if parsed.get("process_parent"):
+        payload["process_parent"] = parsed["process_parent"]
+    if parsed.get("logon_type") is not None:
+        payload["logon_type"] = parsed["logon_type"]
+    if parsed.get("group_name"):
+        payload["group_name"] = parsed["group_name"]
 
     return payload
 
